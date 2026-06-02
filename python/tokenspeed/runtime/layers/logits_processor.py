@@ -123,6 +123,15 @@ class LogitsMetadata:
             capture_hidden_mode=ctx.capture_hidden_mode,
             gather_ids=ctx.gather_ids,
             extend_seq_lens=input_lengths,
+            extend_return_logprob=ctx.extend_return_logprob,
+            extend_return_top_logprob=ctx.extend_return_top_logprob,
+            extend_token_ids_logprob=ctx.extend_token_ids_logprob,
+            extend_logprob_start_lens_cpu=ctx.extend_logprob_start_lens_cpu,
+            extend_seq_lens_cpu=ctx.extend_seq_lens_cpu,
+            extend_logprob_pruned_lens_cpu=ctx.extend_logprob_pruned_lens_cpu,
+            extend_input_logprob_token_ids_gpu=ctx.extend_input_logprob_token_ids_gpu,
+            top_logprobs_nums=ctx.top_logprobs_nums,
+            token_ids_logprobs=ctx.token_ids_logprobs,
         )
 
 
@@ -239,6 +248,10 @@ class LogitsProcessor(nn.Module):
         aux_hidden_states: torch.Tensor | None = None,
     ) -> LogitsProcessorOutput:
         # Get the last hidden states and last logits for the next token prediction
+        # NOTE: ``extend_return_logprob`` is only ever set True once the
+        # prompt-logprob (off-policy) path is wired in Phase B (the
+        # model_executor ctx-setup driven by ``prompt_logprobs``). Until then
+        # this branch is always taken (output-token logprobs only).
         if not logits_metadata.extend_return_logprob:
             gather_ids = logits_metadata.gather_ids
             if gather_ids is not None:

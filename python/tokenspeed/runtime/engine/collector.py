@@ -25,13 +25,24 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+# Streaming merge policy for the logprob meta_info fields.
+#
+# ``logprobs`` and ``prompt_logprobs`` are each a list[dict[int, Logprob]] (one
+# entry per token position) that GROWS as frames arrive, so they must be
+# appended rather than overwritten -- hence they are listed here and merged by
+# ``_extend_sequence``. That helper is dict-safe: its prefix check
+# (``_is_prefix``) compares elements only with ``==``, which both ``dict`` and
+# the ``Logprob`` dataclass support, so the entries never need to be hashed or
+# ordered.
+#
+# ``cumulative_logprob`` is deliberately NOT listed: it is a scalar, so it takes
+# the default overwrite path (latest frame wins) instead. Under streaming each
+# frame recomputes it from a fresh dict, so the emitted value reflects only that
+# frame's positions; clients that need the running total should sum the
+# per-position ``logprobs`` entries themselves.
 _APPEND_META_KEYS = {
-    "input_token_logprobs",
-    "output_token_logprobs",
-    "input_top_logprobs",
-    "output_top_logprobs",
-    "input_token_ids_logprobs",
-    "output_token_ids_logprobs",
+    "logprobs",
+    "prompt_logprobs",
 }
 
 

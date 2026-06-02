@@ -23,15 +23,18 @@ The definition of objects transferred between different
 processes (TokenizerManager, DetokenizerManager, Controller).
 """
 
-import copy
+import logging
 import uuid
 from abc import ABC
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from tokenspeed.runtime.engine.logprob_params import LogprobParams
 from tokenspeed.runtime.engine.request_types import BaseFinishReason
 from tokenspeed.runtime.sampling.sampling_params import SamplingParams
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -79,16 +82,17 @@ class GenerateReqInput:
     user_rid: list[str] | str | None = None
     # Routing id; always server-assigned during normalize, never caller-settable.
     rid: list[str] | str | None = field(default=None, init=False)
-    # Whether to return logprobs.
+    # Logprob return config. None = no logprobs requested.
+    # Per-item in batch mode; normalized to a list in normalize_*.
+    logprob_params: list[LogprobParams | None] | LogprobParams | None = None
+    # --- Deprecated logprob request fields (kept for backward compatibility) ---
+    # Older callers (e.g. the SMG gRPC servicer, legacy clients) still set
+    # these. When ``logprob_params`` is not provided, they are translated into
+    # it during ``normalize_batch_and_arguments``. Prefer ``logprob_params``.
     return_logprob: list[bool] | bool | None = None
-    # If return logprobs, the start location in the prompt for returning logprobs.
-    # By default, this value is "-1", which means it will only return logprobs for output tokens.
     logprob_start_len: list[int] | int | None = None
-    # If return logprobs, the number of top logprobs to return at each position.
     top_logprobs_num: list[int] | int | None = None
-    # If return logprobs, the token ids to return logprob for.
     token_ids_logprob: list[list[int]] | list[int] | None = None
-    # Whether to detokenize tokens in text in the returned logprobs.
     return_text_in_logprobs: bool = False
     # Whether to stream output.
     stream: bool = False
@@ -111,7 +115,54 @@ class GenerateReqInput:
     bootstrap_port: list[int] | int | None = None
     bootstrap_room: list[int] | int | None = None
 
+    def _coerce_legacy_logprob_fields(self):
+        """Translate the deprecated scalar logprob request fields into
+        ``logprob_params`` when the caller did not set the new field directly.
+        Keeps the old request API working (e.g. the SMG gRPC servicer).
+
+        Precedence is new-wins: when ``logprob_params`` is set it takes effect
+        and the deprecated fields are ignored. An *inert* deprecated field
+        (e.g. ``return_logprob=None``) alongside ``logprob_params`` is the
+        normal path and stays silent; a deprecated field that actively requests
+        logprobs while ``logprob_params`` is also set is a genuine conflict and
+        is warned about (rather than raised, to preserve back-compat)."""
+        rl = self.return_logprob
+        if isinstance(rl, list):
+            rl = bool(rl[0]) if rl else False
+        rl = bool(rl)
+        tid = self.token_ids_logprob
+        if isinstance(tid, list) and tid and isinstance(tid[0], list):
+            tid = tid[0]
+        legacy_requested = rl or bool(tid)
+
+        if self.logprob_params is not None:
+            if legacy_requested:
+                logger.warning(
+                    "Both logprob_params and the deprecated logprob request "
+                    "fields (return_logprob/token_ids_logprob) were set; using "
+                    "logprob_params and ignoring the deprecated fields."
+                )
+            return
+
+        if not legacy_requested:
+            return
+        tln = self.top_logprobs_num
+        if isinstance(tln, list):
+            tln = tln[0] if tln else 0
+        tln = int(tln or 0)
+        lsl = self.logprob_start_len
+        if isinstance(lsl, list):
+            lsl = lsl[0] if lsl else -1
+        want_prompt = isinstance(lsl, int) and lsl >= 0
+        self.logprob_params = LogprobParams(
+            logprobs=tln if rl else None,
+            prompt_logprobs=tln if (rl and want_prompt) else None,
+            logprob_token_ids=list(tid) if tid else None,
+            return_text=bool(self.return_text_in_logprobs),
+        )
+
     def normalize_batch_and_arguments(self):
+        self._coerce_legacy_logprob_fields()
         if (
             self.text is None and self.input_ids is None and self.input_embeds is None
         ) or (
@@ -193,14 +244,7 @@ class GenerateReqInput:
                     ), "user_rid list should have length 1 for single request."
                     self.user_rid = self.user_rid[0]
                 assert isinstance(self.user_rid, str), "user_rid should be a str."
-            if self.return_logprob is None:
-                self.return_logprob = False
-            if self.logprob_start_len is None:
-                self.logprob_start_len = -1
-            if self.top_logprobs_num is None:
-                self.top_logprobs_num = 0
-            if not self.token_ids_logprob:  # covers both None and []
-                self.token_ids_logprob = None
+            # logprob_params left as-is (None means no logprobs).
             if isinstance(self.input_extra_infos, dict):
                 self.input_extra_infos = [self.input_extra_infos]
         else:
@@ -228,35 +272,10 @@ class GenerateReqInput:
                     isinstance(self.user_rid, list) and len(self.user_rid) == num
                 ), "user_rid should be a str or a list of matching length."
 
-            if self.return_logprob is None:
-                self.return_logprob = [False] * num
-            elif not isinstance(self.return_logprob, list):
-                self.return_logprob = [self.return_logprob] * num
-            else:
-                assert self.parallel_sample_num == 1
-
-            if self.logprob_start_len is None:
-                self.logprob_start_len = [-1] * num
-            elif not isinstance(self.logprob_start_len, list):
-                self.logprob_start_len = [self.logprob_start_len] * num
-            else:
-                assert self.parallel_sample_num == 1
-
-            if self.top_logprobs_num is None:
-                self.top_logprobs_num = [0] * num
-            elif not isinstance(self.top_logprobs_num, list):
-                self.top_logprobs_num = [self.top_logprobs_num] * num
-            else:
-                assert self.parallel_sample_num == 1
-
-            if not self.token_ids_logprob:  # covers both None and []
-                self.token_ids_logprob = [None] * num
-            elif not isinstance(self.token_ids_logprob, list):
-                self.token_ids_logprob = [[self.token_ids_logprob] for _ in range(num)]
-            elif not isinstance(self.token_ids_logprob[0], list):
-                self.token_ids_logprob = [
-                    copy.deepcopy(self.token_ids_logprob) for _ in range(num)
-                ]
+            if self.logprob_params is None:
+                self.logprob_params = [None] * num
+            elif not isinstance(self.logprob_params, list):
+                self.logprob_params = [self.logprob_params] * num
             else:
                 assert self.parallel_sample_num == 1
 
@@ -320,11 +339,7 @@ class GenerateReqInput:
             ),
             sampling_params=self.sampling_params[i],
             user_rid=self.user_rid[i],
-            return_logprob=self.return_logprob[i],
-            logprob_start_len=self.logprob_start_len[i],
-            top_logprobs_num=self.top_logprobs_num[i],
-            token_ids_logprob=self.token_ids_logprob[i],
-            return_text_in_logprobs=self.return_text_in_logprobs,
+            logprob_params=self.logprob_params[i],
             stream=self.stream,
             log_metrics=self.log_metrics,
             custom_logit_processor=(
@@ -358,14 +373,8 @@ class TokenizedGenerateReqInput:
     input_ids: list[int]
     # The sampling parameters
     sampling_params: SamplingParams
-    # Whether to return the logprobs
-    return_logprob: bool
-    # If return logprobs, the start location in the prompt for returning logprobs.
-    logprob_start_len: int
-    # If return logprobs, the number of top logprobs to return at each position.
-    top_logprobs_num: int
-    # If return logprobs, the token id to return logprob for
-    token_ids_logprob: list[int]
+    # Logprob return config (None = no logprobs requested).
+    logprob_params: LogprobParams | None
     # Whether to stream output
     stream: bool
 

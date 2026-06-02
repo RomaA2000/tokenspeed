@@ -73,6 +73,7 @@ from tokenspeed.runtime.engine.io_struct import (
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromTensorReqInput,
 )
+from tokenspeed.runtime.engine.logprob_params import LogprobParams
 from tokenspeed.runtime.entrypoints.engine_base import EngineBase
 from tokenspeed.runtime.utils import (
     MultiprocessingSerializer,
@@ -155,7 +156,10 @@ class Engine(EngineBase):
         # - List of images (one per request in a batch)
         # - List of lists of images (multiple images per request)
         # See also python/tokenspeed/runtime/utils/common.py:load_image for more details.
-        return_logprob: list[bool] | bool | None = False,
+        logprob_params: list[LogprobParams] | LogprobParams | None = None,
+        # Deprecated logprob request fields. Prefer ``logprob_params``; these are
+        # translated into a LogprobParams by GenerateReqInput for back-compat.
+        return_logprob: list[bool] | bool | None = None,
         logprob_start_len: list[int] | int | None = None,
         top_logprobs_num: list[int] | int | None = None,
         token_ids_logprob: list[list[int]] | list[int] | None = None,
@@ -183,15 +187,15 @@ class Engine(EngineBase):
                 )
 
         if self.tokenizer_manager.server_args.speculative_algorithm is not None:
-            return_logprob = False
-            logprob_start_len = None
-            top_logprobs_num = None
+            logprob_params = None
+            return_logprob = None
             token_ids_logprob = None
 
         obj = GenerateReqInput(
             text=prompt,
             input_ids=input_ids,
             sampling_params=sampling_params,
+            logprob_params=logprob_params,
             return_logprob=return_logprob,
             logprob_start_len=logprob_start_len,
             top_logprobs_num=top_logprobs_num,
@@ -224,7 +228,10 @@ class Engine(EngineBase):
         # - List of images (one per request in a batch)
         # - List of lists of images (multiple images per request)
         # See also python/tokenspeed/runtime/utils/common.py:load_image for more details.
-        return_logprob: list[bool] | bool | None = False,
+        logprob_params: list[LogprobParams] | LogprobParams | None = None,
+        # Deprecated logprob request fields. Prefer ``logprob_params``; these are
+        # translated into a LogprobParams by GenerateReqInput for back-compat.
+        return_logprob: list[bool] | bool | None = None,
         logprob_start_len: list[int] | int | None = None,
         top_logprobs_num: list[int] | int | None = None,
         token_ids_logprob: list[list[int]] | list[int] | None = None,
@@ -243,9 +250,8 @@ class Engine(EngineBase):
         """
 
         if self.tokenizer_manager.server_args.speculative_algorithm is not None:
-            return_logprob = False
-            logprob_start_len = None
-            top_logprobs_num = None
+            logprob_params = None
+            return_logprob = None
             token_ids_logprob = None
 
         obj = GenerateReqInput(
@@ -255,6 +261,7 @@ class Engine(EngineBase):
             input_multi_ids=input_multi_ids,
             input_extra_infos=input_extra_infos,
             sampling_params=sampling_params,
+            logprob_params=logprob_params,
             return_logprob=return_logprob,
             logprob_start_len=logprob_start_len,
             top_logprobs_num=top_logprobs_num,
